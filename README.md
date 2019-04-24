@@ -1,4 +1,4 @@
-# Sift Science PHP Bindings <a href="https://travis-ci.org/SiftScience/sift-php"><img src="https://travis-ci.org/SiftScience/sift-php.svg?branch=master">
+# Sift Bindings [![CircleCI](https://circleci.com/gh/SiftScience/sift-php.svg?style=svg)](https://circleci.com/gh/SiftScience/sift-php)
 
 
 ## Installation
@@ -10,7 +10,7 @@
     ```
     "require": {
         ...
-        "siftscience/sift-php" : "2.*"
+        "siftscience/sift-php" : "4.*"
         ...
     }
     ```
@@ -44,7 +44,6 @@
 3. Include `SiftClient` in your project like this:
 
     ```
-    require 'sift-php/lib/Services_JSON-1.0.3/JSON.php';
     require 'sift-php/lib/SiftRequest.php';
     require 'sift-php/lib/SiftResponse.php';
     require 'sift-php/lib/SiftClient.php';
@@ -68,11 +67,11 @@ $response = $sift->track('$transaction', array(
     '$user_id' => '23056',
     '$user_email' => 'buyer@gmail.com',
     '$seller_user_id' => '2371',
-    '$seller_user_email' => 'seller@gmail.com',
     '$transaction_id' => '573050',
     '$currency_code' => 'USD',
     '$amount' => 15230000,
     '$time' => 1327604222,
+    'seller_user_email' => 'seller@gmail.com',
     'trip_time' => 930,
     'distance_traveled' => 5.26,
 ));
@@ -121,11 +120,52 @@ $response = $sift->getOrderDecisions('example_order');
 $response->body['decisions']['payment_abuse']['decision']['id']; // => "ship_order"
 ```
 
+### Get the latest decisions for a session
+```
+$sift = new SiftClient(array('api_key' => 'my_api_key', 'account_id' => 'my_account_id'));
+$response = $sift->getSessionDecisions('example_user', 'example_session');
+$response->body['decisions']['account_takeover']['decision']['id']; // => "session_decision"
+```
+
+### List of configured Decisions
+**Optional Params**
+ - `entity_type`: `user` or `order` or `session`
+ - `abuse_types`: `["payment_abuse", "content_abuse", "content_abuse",
+   "account_abuse", "legacy", "account_takeover"]`
+
+```
+$sift = new SiftClient(array('api_key' => 'my_api_key', 'account_id' => 'my_account_id'));
+$response = $this->client->getDecisions(array('entity_type' => 'example_entity_type','abuse_types' => 'example_abuse_types'));
+$response->isOk()
+```
+
+### Apply decision to a user
+```
+$sift = new SiftClient(array('api_key' => 'my_api_key', 'account_id' => 'my_account_id'));
+$response = $sift->applyDecisionToUser('example_user','example_decision','example_source',array('analyst' => 'analyst@example.com')
+$response->isOk()
+```
+
+### Apply decision to an order
+```
+$sift = new SiftClient(array('api_key' => 'my_api_key', 'account_id' => 'my_account_id'));
+$response = $sift->applyDecisionToOrder('example_user','example_order','example_decision','example_source',array('analyst' => 'analyst@example.com')
+$response->isOk()
+```
+
+### Apply decision to a session
+```
+$sift = new SiftClient(array('api_key' => 'my_api_key', 'account_id' => 'my_account_id'));
+$response = $sift->applyDecisionToSession('example_user','example_session','example_decision','example_source',array('analyst' => 'analyst@example.com')
+$response->isOk()
+```
+
 ## Contributing
 Run the tests from the project root with [PHPUnit](http://phpunit.de) like this:
 
 ```
-phpunit --bootstrap vendor/autoload.php test
+composer update
+composer exec phpunit -v -- --bootstrap vendor/autoload.php test
 ```
 
 
@@ -139,6 +179,42 @@ phpunit --bootstrap vendor/autoload.php test
     [Packagist](https://packagist.org/packages/siftscience/sift-php) will
     automatically deploy a new package via the configured webhook.
 
+## HTTP connection pooling
+
+You can substantially improve the performance of `SiftClient` by using HTTP connection pooling.
+Because standard PHP/fastcgi deployments don't have a mechanisms for persisting connections between
+requests, the easiest way to pool connections is by running
+[Apache httpd](https://httpd.apache.org/) as a proxy.
+
+```
+Listen 8081
+
+...
+
+LoadModule proxy_module .../mod_proxy.so
+LoadModule proxy_http_module .../mod_proxy_http.so
+LoadModule ssl_module .../mod_ssl.so
+
+<VirtualHost localhost:8081>
+    ServerName api.sift.com
+    SSLProxyEngine on
+    SSLProxyVerify require
+    SSLProxyVerifyDepth 3
+    SSLProxyCACertificateFile ...
+    ProxyPass / https://api.sift.com/
+</VirtualHost>
+```
+
+And instantiating `SiftClient` to route requests through it:
+
+```php
+$sift = new SiftClient(array(
+    'api_key' => 'my_api_key',
+    'account_id' => 'my_account_id',
+    'api_endpoint' => 'http://api.sift.com',
+    'curl_opts' => array(CURLOPT_CONNECT_TO => array('api.sift.com:80:localhost:8081')),
+));
+```
 
 ## License
 

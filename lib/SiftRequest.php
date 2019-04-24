@@ -14,20 +14,22 @@ class SiftRequest {
     private $body;
     private $params;
     private $auth;
+    private $curl_opts;
 
     /**
      * SiftRequest constructor
      *
-     * @param string $url  Url for the HTTP request
-     * @param string $method  Method for the HTTP request
-     * @param int $timeout  Request timeout
-     * @param string $version  Version of the Sift Science API that is being called.
-     * @param array $opts  Array of optional parameters for this request --
+     * @param string $url Url for the HTTP request
+     * @param string $method Method for the HTTP request
+     * @param int $timeout Request timeout
+     * @param string $version Version of the Sift Science API that is being called.
+     * @param array $opts Array of optional parameters for this request --
      *     - array 'params': URL query parameters for the request.
      *     - array 'body': HTTP body for the request.
      *     - string 'auth': Basic authorization for the request (i.e., "username:password").
+     * @param array $curl_opts And associative array of libcurl options to set with curl_setopt
      */
-    function __construct($url, $method, $timeout, $version, $opts = array()) {
+    function __construct($url, $method, $timeout, $version, $opts = array(), $curl_opts = array()) {
         $opts += array(
             'params' => array(),
             'body' => array(),
@@ -41,6 +43,7 @@ class SiftRequest {
         $this->body = $opts['body'];
         $this->params = $opts['params'];
         $this->auth = $opts['auth'];
+        $this->curl_opts = $curl_opts;
     }
 
     /**
@@ -85,10 +88,10 @@ class SiftRequest {
                 $json = new Services_JSON();
                 $jsonString = $json->encodeUnsafe($this->body);
             }
+
             curl_setopt($ch, CURLOPT_POST, 1);
             curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonString);
-            $headers += array(
-                'Content-Type: application/json',
+            array_push($headers, 'Content-Type: application/json',
                 'Content-Length: ' . strlen($jsonString)
             );
 
@@ -96,15 +99,23 @@ class SiftRequest {
             curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "DELETE");
         }
 
+        foreach ($this->curl_opts as $option => $value) {
+            if ($option !== CURLOPT_HTTPHEADER) {
+                curl_setopt($ch, $option, $value);
+            } else {
+                $headers = array_merge($headers, $value);
+            }
+        }
+
         // Send the request using curl and parse result
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         $result = curl_exec($ch);
         $httpStatusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-        // Close the curl connection
+        $curlErrno = curl_errno($ch);
+        $curlError = curl_error($ch);
         curl_close($ch);
 
-        return new SiftResponse($result, $httpStatusCode, $this);
+        return new SiftResponse($result, $httpStatusCode, $this, $curlErrno, $curlError);
     }
 
     public static function setMockResponse($url, $method, $response) {

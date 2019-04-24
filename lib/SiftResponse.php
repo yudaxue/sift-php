@@ -3,37 +3,55 @@
 class SiftResponse {
     public $body;
     public $httpStatusCode;
+    public $curlErrno;
+    public $curlError;
     public $apiStatus;
+    public $apiError;
     public $apiErrorMessage;
+    public $apiDescription;
     public $request;
     public $rawResponse;
 
-    public function __construct($result, $httpStatusCode, $request) {
+    public function __construct($result, $httpStatusCode, $request, $curlErrno = 0, $curlError = '') {
         $this->body = null;
         $this->apiStatus = null;
         $this->apiErrorMessage = null;
-        
-        if (function_exists('json_decode')) {
-            $this->body = json_decode($result, true);
-        } else {
-            require_once(dirname(__FILE__) . '/Services_JSON-1.0.3/JSON.php');
-            $json = new Services_JSON(SERVICES_JSON_LOOSE_TYPE);
-            $this->body = $json->decode($result);
-        }
+        $this->apiError = null;
+        $this->apiDescription = null;
         $this->httpStatusCode = $httpStatusCode;
+        $this->curlErrno = $curlErrno;
+        $this->curlError = $curlError;
         $this->request = $request;
         $this->rawResponse = $result;
 
         // Only attempt to get our response body if the http status code expects a body
-        if (!in_array($this->httpStatusCode, array(204,304))) {
-            $json = new Services_JSON(SERVICES_JSON_LOOSE_TYPE);
-            $this->body = $json->decode($result);
-            // NOTE: Responses from /v3 endpoints don't contain status or error_message.
-            if (array_key_exists('status', $this->body)) {
-                $this->apiStatus = intval($this->body['status']);
+        if ($this->httpStatusCode >= 200 && !in_array($this->httpStatusCode, array(204, 304))) {
+            if (function_exists('json_decode')) {
+                $this->body = json_decode($result, true);
+            } else {
+                require_once(dirname(__FILE__) . '/Services_JSON-1.0.3/JSON.php');
+                $json = new Services_JSON(SERVICES_JSON_LOOSE_TYPE);
+                $this->body = $json->decode($result);
             }
-            if (array_key_exists('error_message', $this->body)) {
-                $this->apiErrorMessage = $this->body['error_message'];
+
+            if (is_null($this->body)) {
+                $this->apiErrorMessage = 'Invalid JSON received from Sift API';
+            } elseif (is_array($this->body)) {
+                // /v3 responses use error and description
+                if (array_key_exists('error', $this->body)) {
+                    $this->apiError = $this->body['error'];
+                }
+                if (array_key_exists('description', $this->body)) {
+                    $this->apiDescription = $this->body['description'];
+                }
+
+                // /v2xx responses use status and error_message
+                if (array_key_exists('status', $this->body)) {
+                    $this->apiStatus = intval($this->body['status']);
+                }
+                if (array_key_exists('error_message', $this->body)) {
+                    $this->apiErrorMessage = $this->body['error_message'];
+                }
             }
         }
     }
@@ -57,7 +75,7 @@ class SiftResponse {
 
     public function isOk() {
         // If there is no body, check the http status code only (should be 204)
-        if (in_array($this->httpStatusCode, array(204,304))) {
+        if (in_array($this->httpStatusCode, array(204, 304))) {
             return 204 === $this->httpStatusCode;
         }
 

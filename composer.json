@@ -4,7 +4,7 @@
     "keywords": ["sift", "sift science", "php", "fraud"],
     "homepage": "https://github.com/SiftScience/sift-php",
     "license": "MIT",
-    "version": "2.0.1",
+    "version": "4.0.0",
     "authors": [
         {
             "name": "Alex Lopatin"
@@ -14,20 +14,27 @@
         },
         {
             "name": "Jacob Burnim"
+        },
+        {
+            "name": "Gary Lee"
+        },
+        {
+            "name": "Mohammed Jouahri"
+        },
+        {
+            "name": "Alex Paino"
         }
-
     ],
     "support": {
         "email": "support@siftscience.com"
     },
     "require": {
-        "php": ">=5.0.0"
+        "php": ">=7.1.0"
     },
     "require-dev": {
-        "phpunit/phpunit": "3.7.*"
+        "phpunit/phpunit": "7.*"
     },
     "autoload": {
         "classmap": ["lib/"]
     }
 }
-

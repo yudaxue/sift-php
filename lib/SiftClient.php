@@ -1,11 +1,10 @@
 <?php
 
 class SiftClient {
-    const API_ENDPOINT = 'https://api.siftscience.com';
-    const API3_ENDPOINT = 'https://api3.siftscience.com';
+    const API_ENDPOINT = 'https://api.sift.com';
 
     // Must be kept in sync with composer.json
-    const API_VERSION = '204';
+    const API_VERSION = '205';
 
     const API3_VERSION = '3';
 
@@ -15,7 +14,29 @@ class SiftClient {
     private $account_id;
     private $timeout;
     private $version;
+    private $api_endpoint;
+    private $curl_opts;
 
+    /**
+     * @var null|\Psr\Log\LoggerInterface
+     */
+    private $logger;
+    /**
+     * @param \Psr\Log\LoggerInterface $logger
+     */
+    public function setLogger(\Psr\Log\LoggerInterface $logger)
+    {
+        $this->logger = $logger;
+    }
+    /**
+     * @param string $message
+     * @param array  $context
+     */
+    private function logError($message, array $context = array()) {
+        if ($this->logger) {
+            $this->logger->error($message, $context);
+        }
+    }
 
     /**
      * SiftClient constructor.
@@ -27,13 +48,20 @@ class SiftClient {
      *           Sift::$account_id.
      *     - int 'timeout': The number of seconds to wait before failing a request.  By default, 2.
      *     - string 'version': The version of Sift Science's API to call.  By default, '204'.
+     *     - string 'api_endpoint': The backend api to send requests to.  By default,
+     *           'https://api.sift.com'.
+     *     - array 'curl_opts': Array with key-value pairs corresponding to options to pass to
+     *           curl_setopt().  Options override any options set by the SiftClient, so use with
+     *           caution.  By default, array().
      */
     function  __construct($opts = array()) {
         $this->mergeArguments($opts, array(
             'api_key' => Sift::$api_key,
             'account_id' => Sift::$account_id,
             'timeout' => self::DEFAULT_TIMEOUT,
-            'version' => self::API_VERSION
+            'version' => self::API_VERSION,
+            'api_endpoint' => self::API_ENDPOINT,
+            'curl_opts' => array(),
         ));
 
         $this->validateArgument($opts['api_key'], 'api key', 'string');
@@ -42,6 +70,8 @@ class SiftClient {
         $this->account_id = $opts['account_id'];
         $this->timeout = $opts['timeout'];
         $this->version = $opts['version'];
+        $this->api_endpoint = $opts['api_endpoint'];
+        $this->curl_opts = $opts['curl_opts'];
     }
 
 
@@ -65,6 +95,8 @@ class SiftClient {
      *           API response.
      *     - bool 'return_workflow_status': Whether to return the status of any workflow run as a
      *           result of the posted event in the API response.
+     *     - bool 'force_workflow_run': Whether to request an asynchronous workflow run if the 
+     *           workflow is configured to only run with API request.      
      *     - array 'abuse_types': List of abuse types, specifying for which abuse types a score
      *          should be returned (if scores were requested).  If not specified, a score will
      *          be returned for every abuse_type to which you are subscribed.
@@ -80,8 +112,9 @@ class SiftClient {
             'return_score' => false,
             'return_action' => false,
             'return_workflow_status' => false,
+            'force_workflow_run' => false,
             'abuse_types' => array(),
-            'path' => NULL,
+            'path' => null,
             'timeout' => $this->timeout,
             'version' => $this->version
         ));
@@ -100,6 +133,7 @@ class SiftClient {
         if ($opts['return_score']) $params['return_score'] = 'true';
         if ($opts['return_action']) $params['return_action'] = 'true';
         if ($opts['return_workflow_status']) $params['return_workflow_status'] = 'true';
+        if ($opts['force_workflow_run']) $params['force_workflow_run'] = 'true';
         if ($opts['abuse_types']) $params['abuse_types'] = implode(',', $opts['abuse_types']);
 
         try {
@@ -107,9 +141,12 @@ class SiftClient {
                 $path, SiftRequest::POST, $opts['timeout'], $opts['version'], array(
                     'body' => $properties,
                     'params' => $params
-                ));
+                ),
+                $this->curl_opts
+            );
             return $request->send();
         } catch (Exception $e) {
+            $this->logError($e->getMessage());
             return null;
         }
     }
@@ -143,10 +180,93 @@ class SiftClient {
         if ($opts['abuse_types']) $params['abuse_types'] = implode(',', $opts['abuse_types']);
 
         try {
+            $request = new SiftRequest(self::scoreApiUrl($userId, $opts['version']),
+                SiftRequest::GET, $opts['timeout'], $opts['version'], array('params' => $params));
+            return $request->send();
+        } catch (Exception $e) {
+            $this->logError($e->getMessage());
+            return null;
+        }
+    }
+
+
+    /**
+     * Fetches the latest score(s) computed for the specified user and abuse types from the Sift Science API.
+     *
+     * As opposed to client.score() and client.rescore_user(), this *does not* compute a new score for the
+     * user; it simply fetches the latest score(s) which have computed. These scores may be arbitrarily old.
+     * See https://siftscience.com/developers/docs/php/score-api/get-score for more details.
+     *
+     * @param string $userId  A user's id. This id should be the same as the user_id used in event
+     *     calls.  This parameter is required.
+     *
+     * @param array $opts  Array of optional parameters for this request:
+     *     - array 'abuse_types': List of abuse types, specifying for which abuse types a score
+     *           should be returned.  If not specified, a score will be returned for every abuse
+     *           type to which you are subscribed.
+     *     - int 'timeout': By default, this client's timeout is used.
+     *     - string 'version': By default, this client's version is used.
+     *
+     * @return null|SiftResponse
+     */
+    public function get_user_score($userId, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'abuse_types' => array(),
+            'timeout' => $this->timeout,
+            'version' => $this->version
+        ));
+
+        $this->validateArgument($userId, 'user id', 'string');
+
+        $params = array('api_key' => $this->api_key);
+        if ($opts['abuse_types']) $params['abuse_types'] = implode(',', $opts['abuse_types']);
+
+        try {
             $request = new SiftRequest(self::userScoreApiUrl($userId, $opts['version']),
                 SiftRequest::GET, $opts['timeout'], $opts['version'], array('params' => $params));
             return $request->send();
         } catch (Exception $e) {
+            $this->logError($e->getMessage());
+            return null;
+        }
+    }
+
+
+    /**
+     * Rescores the specified user for the specified abuse types and returns the resulting score(s).
+     *
+     * See https://siftscience.com/developers/docs/php/score-api/rescore for more details.
+     *
+     * @param string $userId  A user's id. This id should be the same as the user_id used in event
+     *     calls.  This parameter is required.
+     *
+     * @param array $opts  Array of optional parameters for this request:
+     *     - array 'abuse_types': List of abuse types, specifying for which abuse types a score
+     *           should be returned.  If not specified, a score will be returned for every abuse
+     *           type to which you are subscribed.
+     *     - int 'timeout': By default, this client's timeout is used.
+     *     - string 'version': By default, this client's version is used.
+     *
+     * @return null|SiftResponse
+     */
+    public function rescore_user($userId, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'abuse_types' => array(),
+            'timeout' => $this->timeout,
+            'version' => $this->version
+        ));
+
+        $this->validateArgument($userId, 'user id', 'string');
+
+        $params = array('api_key' => $this->api_key);
+        if ($opts['abuse_types']) $params['abuse_types'] = implode(',', $opts['abuse_types']);
+
+        try {
+            $request = new SiftRequest(self::userScoreApiUrl($userId, $opts['version']),
+                SiftRequest::POST, $opts['timeout'], $opts['version'], array('params' => $params));
+            return $request->send();
+        } catch (Exception $e) {
+            $this->logError($e->getMessage());
             return null;
         }
     }
@@ -160,8 +280,8 @@ class SiftClient {
      *
      * @param string $userId  The ID of a user.  This parameter is required.
      *
-     * @param $properties An array of name-value pairs that specify the label attributes. This
-     *     parameter is required.
+     * @param array $properties An array of name-value pairs that specify the label attributes.
+     *     This parameter is required.
      *
      * @param array $opts  Array of optional parameters for this request:
      *     - int 'timeout': By default, this client's timeout is used.
@@ -216,6 +336,7 @@ class SiftClient {
                 SiftRequest::DELETE, $opts['timeout'], $opts['version'], array('params' => $params));
             return $request->send();
         } catch (Exception $e) {
+            $this->logError($e->getMessage());
             return null;
         }
     }
@@ -238,14 +359,16 @@ class SiftClient {
 
         $this->validateArgument($run_id, 'run id', 'string');
 
-        $url = (self::API3_ENDPOINT . '/v3/accounts/'
-                . $opts['account_id'] . '/workflows/runs/' . $run_id);
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/workflows/runs/' . rawurlencode($run_id));
 
         try {
             $request = new SiftRequest($url, SiftRequest::GET, $opts['timeout'], self::API3_VERSION,
                                        array('auth' => $this->api_key . ':'));
             return $request->send();
         } catch (Exception $e) {
+            $this->logError($e->getMessage());
             return null;
         }
     }
@@ -268,14 +391,17 @@ class SiftClient {
 
         $this->validateArgument($user_id, 'user id', 'string');
 
-        $url = (self::API3_ENDPOINT . '/v3/accounts/'
-                . $opts['account_id'] . '/users/' . $user_id . '/decisions');
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/users/' . rawurlencode($user_id) .
+            '/decisions');
 
         try {
             $request = new SiftRequest($url, SiftRequest::GET, $opts['timeout'], self::API3_VERSION,
                                        array('auth' => $this->api_key . ':'));
             return $request->send();
         } catch (Exception $e) {
+            $this->logError($e->getMessage());
             return null;
         }
     }
@@ -284,7 +410,7 @@ class SiftClient {
     /**
      * Gets the latest decision for a user for each abuse type.
      *
-     * @param string $user_id  The ID of a user.
+     * @param string $order_id  The ID of an order.
      *
      * @param array $opts  Array of optional parameters for this request:
      *     - string 'account_id': by default, this client's account ID is used.
@@ -298,14 +424,338 @@ class SiftClient {
 
         $this->validateArgument($order_id, 'order id', 'string');
 
-        $url = (self::API3_ENDPOINT . '/v3/accounts/'
-                . $opts['account_id'] . '/orders/' . $order_id . '/decisions');
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/orders/' . rawurlencode($order_id) .
+            '/decisions');
 
         try {
             $request = new SiftRequest($url, SiftRequest::GET, $opts['timeout'], self::API3_VERSION,
                                        array('auth' => $this->api_key . ':'));
             return $request->send();
         } catch (Exception $e) {
+            $this->logError($e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Gets the latest decision for a session.
+     *
+     * @param string $user_id     The ID of session's user.
+     * @param string $session_id  The ID of a session.
+     *
+     * @param array $opts  Array of optional parameters for this request:
+     *     - string 'account_id': by default, this client's account ID is used.
+     *     - int 'timeout': By default, this client's timeout is used.
+     */
+    public function getSessionDecisions($user_id, $session_id, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'account_id' => $this->account_id,
+            'timeout' => $this->timeout
+        ));
+
+        $this->validateArgument($session_id, 'session id', 'string');
+
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/users/' . rawurlencode($user_id) .
+            '/sessions/' . rawurlencode($session_id) .
+            '/decisions');
+
+        try {
+            $request = new SiftRequest($url, SiftRequest::GET, $opts['timeout'], self::API3_VERSION,
+                                       array('auth' => $this->api_key . ':'));
+            return $request->send();
+        } catch (Exception $e) {
+            $this->logError($e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Gets the latest decision for a piece of content.
+     *
+     * @param string $content_id  The ID of a piece of content.
+     * @param string $user_id     The ID of the owner of the content.
+     *
+     * @param array $opts  Array of optional parameters for this request:
+     *     - string 'account_id': by default, this client's account ID is used.
+     *     - int 'timeout': By default, this client's timeout is used.
+     */
+    public function getContentDecisions($user_id, $content_id, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'account_id' => $this->account_id,
+            'timeout' => $this->timeout
+        ));
+
+        $this->validateArgument($content_id, 'content id', 'string');
+
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/users/' . rawurlencode($user_id) .
+            '/content/' . rawurlencode($content_id) .
+            '/decisions');
+
+        try {
+            $request = new SiftRequest($url, SiftRequest::GET, $opts['timeout'], self::API3_VERSION,
+                                       array('auth' => $this->api_key . ':'));
+            return $request->send();
+        } catch (Exception $e) {
+            $this->logError($e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Gets a list of configured decisions.
+     *
+     * @param array $opts  Array of optional parameters for this request:
+     *     - string 'account_id': by default, this client's account ID is used.
+     *     - int 'timeout': By default, this client's timeout is used.
+     *     - array 'abuse_types': filters decisions which can be appiled to
+     *       listed abuse types
+     *     - string 'entity_type': filters on decisions which can be applied to
+     *       a specified entity_type
+     *     - string 'next_ref': url that will fetch the next page of decisions
+     *     - int 'limit': sets the max number of decisions returned
+     *     - int 'from': will return the next decision from the index given up
+     *       to the limit.
+     */
+    public function getDecisions($opts = array()) {
+        $this->mergeArguments($opts, array(
+            'account_id' => $this->account_id,
+            'timeout' => $this->timeout,
+            'abuse_types' => null,
+            'entity_type' => null,
+            'next_ref' => null,
+            'limit' => null,
+            'from' => null
+        ));
+
+        $params = array();
+
+        if ($opts['next_ref']) {
+            $url = $opts['next_ref'];
+        } else {
+            $url = ($this->api_endpoint .
+                '/v3/accounts/' . rawurlencode($opts['account_id']) .
+                '/decisions');
+
+            if ($opts['abuse_types']) $params['abuse_types'] = implode(',', $opts['abuse_types']);
+            if ($opts['entity_type']) $params['entity_type'] = $opts['entity_type'];
+            if ($opts['limit']) $params['limit'] = $opts['limit'];
+            if ($opts['from']) $params['from'] = $opts['from'];
+        }
+
+        try {
+            $request = new SiftRequest($url, SiftRequest::GET, $opts['timeout'],
+                self::API3_VERSION,
+                array('auth' => $this->api_key . ':'));
+
+            return $request->send();
+        } catch (Exception $e) {
+            $this->logError($e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Apply a decision to a user. Builds url to apply decision to user and
+     * delegates to applyDecision
+     *
+     * @param string $user_id the id of the user that will get this decision
+     * @param string $decision_id The decision that will be applied to a user
+     * @param string $source the source of the decision, i.e. MANUAL_REVIEW,
+     *     AUTOMATED_RULE, CHARGEBACK
+     * @param array $opts  Array of optional parameters for this request:
+     *     - string 'account_id': by default, this client's account ID is used.
+     *     - int 'timeout': By default, this client's timeout is used.
+     *     - string 'analyst': when the source is MANUAL_REVIEW, an analyst
+     *     identifier must be passed.
+     *     - string 'description': free form text adding context to why this
+     *     decision is being applied.
+     *     - int 'time': Timestamp of when a decision was applied, mainly used
+     *     for backfilling
+     */
+    public function applyDecisionToUser($user_id, $decision_id, $source, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'account_id' => $this->account_id,
+            'timeout' => $this->timeout,
+            'decision_id' => $decision_id,
+            'source' => $source,
+            'analyst' => null,
+            'description' => null,
+            'time' => null
+        ));
+
+        $this->validateArgument($user_id, 'user_id', 'string');
+
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/users/'. rawurlencode($user_id) .
+            '/decisions');
+
+        return $this->applyDecision($url, $opts);
+    }
+
+    /**
+     * Apply a decision to an order. Validates presence of order_id and builds
+     * the url to apply a decision to an order and delegates to applyDecision.
+     *
+     * @param string $user_id the id of order's user id
+     * @param string $order_id the id of the order which the decision will be
+     * applied
+     * @param string $decision_id The decision that will be applied to the order
+     * @param string $source the source of the decision, i.e. MANUAL_REVIEW,
+     * @param array $opts  Array of optional parameters for this request:
+     *     AUTOMATED_RULE, CHARGEBACK
+     *     - string 'account_id': by default, this client's account ID is used.
+     *     - int 'timeout': By default, this client's timeout is used.
+     *     - string 'analyst': when the source is MANUAL_REVIEW, an analyst
+     *     identifier must be passed.
+     *     - string 'description': free form text adding context to why this
+     *     decision is being applied.
+     *     - int 'time': Timestamp of when a decision was applied, mainly used
+     *     for backfilling
+     */
+    public function applyDecisionToOrder($user_id, $order_id, $decision_id, $source, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'account_id' => $this->account_id,
+            'timeout' => $this->timeout,
+            'decision_id' => $decision_id,
+            'source' => $source,
+            'analyst' => null,
+            'description' => null,
+            'time' => null
+        ));
+
+        $this->validateArgument($order_id, 'order_id', 'string');
+        $this->validateArgument($user_id, 'user_id', 'string');
+
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/users/' . rawurlencode($user_id) .
+            '/orders/' . rawurlencode($order_id) .
+            '/decisions');
+
+        return $this->applyDecision($url, $opts);
+    }
+
+    /**
+     * Apply a decision to a piece of content. Validates presence of content_id
+     * and builds the url to apply a decision to a piece of content and delegates
+     * to applyDecision.
+     *
+     * @param string $user_id the id of content's user id
+     * @param string $content_id the id of the content which the decision will
+     * be applied
+     * @param string $decision_id The decision that will be applied to the order
+     * @param string $source the source of the decision, i.e. MANUAL_REVIEW,
+     * @param array $opts  Array of optional parameters for this request:
+     *     AUTOMATED_RULE, CHARGEBACK
+     *     - string 'account_id': by default, this client's account ID is used.
+     *     - int 'timeout': By default, this client's timeout is used.
+     *     - string 'analyst': when the source is MANUAL_REVIEW, an analyst
+     *     identifier must be passed.
+     *     - string 'description': free form text adding context to why this
+     *     decision is being applied.
+     *     - int 'time': Timestamp of when a decision was applied, mainly used
+     *     for backfilling
+     */
+    public function applyDecisionToContent($user_id, $content_id, $decision_id, $source, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'account_id' => $this->account_id,
+            'timeout' => $this->timeout,
+            'decision_id' => $decision_id,
+            'source' => $source,
+            'analyst' => null,
+            'description' => null,
+            'time' => null
+        ));
+
+        $this->validateArgument($content_id, 'content_id', 'string');
+        $this->validateArgument($user_id, 'user_id', 'string');
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . $opts['account_id'] .
+            '/users/' . rawurlencode($user_id) .
+            '/content/' . rawurlencode($content_id) .
+            '/decisions');
+
+        return $this->applyDecision($url, $opts);
+    }
+
+    /**
+     * Apply a decision to a session. Validates presence of order_id and builds
+     * the url to apply a decision to a session and delegates to applyDecision.
+     *
+     * @param string $user_id the id of session's user id
+     * @param string $session_id the id of the session which the decision will be
+     * applied
+     * @param string $decision_id The decision that will be applied to the session
+     * @param string $source the source of the decision, i.e. MANUAL_REVIEW,
+     * @param array $opts  Array of optional parameters for this request:
+     *     AUTOMATED_RULE, CHARGEBACK
+     *     - string 'account_id': by default, this client's account ID is used.
+     *     - int 'timeout': By default, this client's timeout is used.
+     *     - string 'analyst': when the source is MANUAL_REVIEW, an analyst
+     *     identifier must be passed.
+     *     - string 'description': free form text adding context to why this
+     *     decision is being applied.
+     *     - int 'time': Timestamp of when a decision was applied, mainly used
+     *     for backfilling
+     */
+    public function applyDecisionToSession($user_id, $session_id, $decision_id, $source, $opts = array()) {
+        $this->mergeArguments($opts, array(
+            'account_id' => $this->account_id,
+            'timeout' => $this->timeout,
+            'decision_id' => $decision_id,
+            'source' => $source,
+            'analyst' => null,
+            'description' => null,
+            'time' => null
+        ));
+
+        $this->validateArgument($session_id, 'session_id', 'string');
+        $this->validateArgument($user_id, 'user_id', 'string');
+
+        $url = ($this->api_endpoint .
+            '/v3/accounts/' . rawurlencode($opts['account_id']) .
+            '/users/' . rawurlencode($user_id) .
+            '/sessions/' . rawurlencode($session_id) .
+            '/decisions');
+
+        return $this->applyDecision($url, $opts);
+    }
+
+    private function applyDecision($url, $opts = array()) {
+        $this->validateArgument($opts['decision_id'], 'decision_id', 'string');
+        $this->validateArgument($opts['source'], 'source', 'string');
+
+        $body = array(
+            'decision_id' => $opts['decision_id'],
+            'source' => $opts['source']
+        );
+
+        if ($opts['analyst']) $body['analyst'] = $opts['analyst'];
+        if ($opts['description']) $body['description'] = $opts['description'];
+        if ($opts['time']) $body['time'] = $opts['time'];
+
+        try {
+            $request = new SiftRequest(
+                $url,
+                SiftRequest::POST,
+                $opts['timeout'],
+                self::API3_VERSION,
+                array(
+                    'auth' => $this->api_key . ':',
+                    'body' => $body
+                )
+            );
+
+            return $request->send();
+        } catch (Exception $e) {
+            $this->logError($e->getMessage());
             return null;
         }
     }
@@ -347,19 +797,23 @@ class SiftClient {
             throw new InvalidArgumentException("${name} cannot be empty.");
     }
 
-    private static function restApiUrl($version) {
+    private function restApiUrl($version) {
         return self::urlPrefix($version) . '/events';
     }
 
-    private static function userLabelApiUrl($userId, $version) {
-        return self::urlPrefix($version) . '/users/' . urlencode($userId) . '/labels';
+    private function userLabelApiUrl($userId, $version) {
+        return self::urlPrefix($version) . '/users/' . rawurlencode($userId) . '/labels';
     }
 
-    private static function userScoreApiUrl($userId, $version) {
-        return self::urlPrefix($version) . '/score/' . urlencode($userId);
+    private function scoreApiUrl($userId, $version) {
+        return self::urlPrefix($version) . '/score/' . rawurlencode($userId);
     }
 
-    private static function urlPrefix($version) {
-        return self::API_ENDPOINT . '/v' . $version;
+    private function userScoreApiUrl($userId, $version) {
+        return self::urlPrefix($version) . '/users/' . urlencode($userId) . '/score';
+    }
+
+    private function urlPrefix($version) {
+        return $this->api_endpoint . '/v' . $version;
     }
 }
